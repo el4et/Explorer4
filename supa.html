@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<title>MD Editor</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<style>
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;overscroll-behavior:none}
+body{display:flex;flex-direction:column;height:100dvh;font:13px 'Segoe UI',system-ui,sans-serif;color:#111;background:#fff;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+button{font:inherit;cursor:pointer}
+#bar{display:flex;align-items:center;gap:4px;padding:2px 6px;border-bottom:1px solid #ddd}
+#status{flex:1;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#bar button{border:0;background:none;font-size:18px;padding:2px 8px}
+#prev,#next{display:none}
+#cols{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr);gap:2px;padding:2px}
+.col{display:flex;flex-direction:column;min-width:0;border:2px solid #c9c9c9}
+.col.active{border-color:#3b82f6}
+.head{display:flex;align-items:center;padding:2px 4px;font-size:12px;font-weight:700}
+.name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.x{border:0;background:none;color:#555}
+.editor{position:relative;flex:1;min-height:0}
+.bd,textarea{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:6px;border:0;font:11pt/1.5 Consolas,'Cascadia Mono','SF Mono',Menlo,'DejaVu Sans Mono',monospace;letter-spacing:0;font-variant-ligatures:none;tab-size:4;white-space:pre-wrap;overflow-wrap:break-word}
+.bd{overflow:hidden;pointer-events:none;color:#111}
+textarea{background:transparent;color:transparent;caret-color:#000;resize:none;outline:0;overflow:auto;-webkit-text-size-adjust:100%}
+textarea::selection{background:rgba(59,130,246,.3);color:transparent}
+.nowrap .bd,.nowrap textarea{white-space:pre;overflow-wrap:normal}
+.b{font-weight:700;font-style:normal}
+.i{font-weight:400;font-style:italic}
+.h{font-weight:700;font-style:normal;color:#0b5394}
+.hit{background:#ffe08a}
+#menu,.pan{position:absolute;z-index:5;background:#fff;border:1px solid #bbb;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+#menu{right:6px;top:calc(34px + env(safe-area-inset-top));min-width:240px;max-height:80dvh;overflow:auto}
+#menu button{display:flex;justify-content:space-between;gap:16px;width:100%;padding:7px 12px;border:0;background:none;text-align:left}
+#menu button:hover{background:#eef4ff}
+#menu small{color:#777}
+#menu hr{margin:3px 0;border:0;border-top:1px solid #ddd}
+.sub{padding-left:14px}
+.pan{right:8px;top:calc(38px + env(safe-area-inset-top));display:flex;gap:6px;align-items:center;padding:6px}
+.pan input{padding:4px}
+dialog{max-width:min(92vw,420px);padding:14px;border:1px solid #888;border-radius:6px}
+dialog input{display:block;width:100%;margin:6px 0;padding:6px}
+.row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+@media (pointer:coarse){.bd,textarea{font-size:16px}}
+@media (max-width:700px){#prev,#next{display:inline}.col:not(.active){display:none}#cols{grid-template-columns:1fr!important}.pan{flex-wrap:wrap;left:8px}}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div id="bar"><span id="status"></span><button id="prev" title="Colonne précédente">‹</button><button id="next" title="Colonne suivante">›</button><button id="burger" title="Menu">☰</button></div>
+<div id="menu" hidden></div>
+<div id="find" class="pan" hidden><input id="fq" placeholder="Rechercher"><input id="fr" placeholder="Remplacer"><button id="fn">Suivant</button><button id="fo">Remplacer</button><button id="fa">Tout remplacer</button><button id="fx">✕</button></div>
+<div id="wt" class="pan" hidden>Poids <input id="wr" type="range" min="0.1" max="5" step="0.1" value="1"><b id="wv">1.0</b><button id="wx">✕</button></div>
+<div id="cols"></div>
+<dialog id="dlg"></dialog>
+<script>
+'use strict';
+/* ---- Configuration Supabase : clé "anon" uniquement, jamais la clé service_role ---- */
+const CFG={url:'https://rrcrhpnnzsepdoqbplfn.supabase.co',key:'sb_publishable_FX9Hg2pzPMZS2x1EwmZg9g_fjUbVzLK',bucket:'md-editor',file:'donnees.json'};
+
+const $=s=>document.querySelector(s);
+const el=(t,c)=>{const e=document.createElement(t);if(c)e.className=c;return e};
+const MOD=/Mac|iPhone|iPad/.test(navigator.platform)?'⌘':'Ctrl+';
+const PAL=['#e6194b','#2c943b','#4363d8','#e56824','#911eb4','#127484','#f032e6','#9a6324','#808000'];
+const RB=/\*\*(.+?)\*\*/g,RI=/(?<!\*)\*([^*]+)\*(?!\*)/g,RH=/^#{1,6}\s/,RC=/([1-9])\^([^^]+?)\^/g;
+document.head.append(Object.assign(el('style'),{textContent:PAL.map((c,i)=>`.c${i+1}{color:${c};font-weight:700;font-style:normal}`).join('')}));
+
+let ws,cur=1,idx=0,wrap=true,dirty=false,locked=false,tm;
+const docs=()=>ws[cur].docs, act=()=>docs()[idx];
+const clampW=v=>{v=Number(v);return isFinite(v)?Math.min(5,Math.max(.1,Math.round(v*10)/10)):1};
+class Doc{constructor(n,c,m,w){this.name=n;this.content=c;this.modified=!!m;this.w=w||1;this.hit=null}
+ get label(){return(this.modified?'* ':'')+this.name}}
+
+function say(t){clearTimeout(tm);$('#status').textContent=t;tm=setTimeout(()=>$('#status').textContent='',5000)}
+function ask(msg,fields=[],yes='OK',no='Annuler'){return new Promise(r=>{
+ const d=$('#dlg');d.innerHTML='';d.append(Object.assign(el('p'),{textContent:msg}));
+ const ins=fields.map(f=>{const i=el('input');i.type=f.type||'text';i.value=f.value||'';i.placeholder=f.ph||'';d.append(i);return i});
+ const row=el('div','row'),ok=el('button');ok.textContent=yes;ok.onclick=()=>d.close('ok');
+ if(no){const c=el('button');c.textContent=no;c.onclick=()=>d.close('no');row.append(c)}
+ row.append(ok);d.append(row);
+ d.onkeydown=e=>{if(e.key==='Enter'&&e.target.tagName==='INPUT'){e.preventDefault();d.close('ok')}};
+ d.onclose=()=>r(d.returnValue==='ok'?ins.map(i=>i.value):null);
+ d.returnValue='';d.showModal();(ins[0]||ok).focus()})}
+const info=m=>ask(m,[],'OK',null);
+
+/* ---- Supabase Storage (REST, sans SDK) ---- */
+let sess=JSON.parse(localStorage.getItem('sb')||'null');
+async function auth(body,grant){
+ const r=await fetch(CFG.url+'/auth/v1/token?grant_type='+grant,{method:'POST',headers:{apikey:CFG.key,'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(j.error_description||j.msg||r.status);
+ sess=j;localStorage.setItem('sb',JSON.stringify(j))}
+async function login(){for(;;){
+ const v=await ask('Connexion à Supabase',[{ph:'E-mail',type:'email'},{ph:'Mot de passe',type:'password'}],'Se connecter',null);
+ if(!v)continue;
+ try{await auth({email:v[0],password:v[1]},'password');return}catch(e){await info('Connexion refusée : '+e.message)}}}
+async function sb(method,body,file=CFG.file){
+ const get=method==='GET';
+ for(let t=0;t<3;t++){
+  if(!sess)await login();
+  const r=await fetch(`${CFG.url}/storage/v1/object/${get?'authenticated/':''}${CFG.bucket}/${file}${get?'?t='+Date.now():''}`,
+   {method,body,cache:'no-store',headers:{apikey:CFG.key,Authorization:'Bearer '+sess.access_token,'Content-Type':'application/json','x-upsert':'true'}});
+  if(r.ok)return get?r.text():true;
+  const tx=await r.text();
+  if(get&&(r.status===404||/not.?found/i.test(tx)))return null;
+  if([400,401,403].includes(r.status)&&t<2){
+   try{await auth({refresh_token:sess.refresh_token},'refresh_token')}catch(e){sess=null;localStorage.removeItem('sb')}
+   continue}
+  throw new Error(r.status+' '+tx)}}
+
+/* ---- Modèle <-> JSON (format v1) ---- */
+function parse(o){
+ if(!o||typeof o!=='object'||!o.workspaces||typeof o.workspaces!=='object')throw new Error('format');
+ const w={};
+ for(let n=1;n<=5;n++){
+  const s=o.workspaces[n]||{},f=Array.isArray(s.files)?s.files:[];
+  const D=f.map((d,i)=>{d=d||{};return new Doc(String(d.name||'').trim()||'Sans titre '+(i+1),typeof d.content==='string'?d.content:'',false,clampW(d.weight))});
+  w[n]={docs:D,active:Number.isInteger(s.active)&&s.active>=0&&s.active<D.length?s.active:(D.length?0:null)}}
+ const a=o.active_workspace;
+ return{ws:w,cur:Number.isInteger(a)&&a>=1&&a<=5?a:1,wrap:o.wrap!==false}}
+function sync(){docs().forEach(d=>{if(d.ta)d.content=d.ta.value})}
+function build(){sync();ws[cur].active=idx;
+ return{version:1,active_workspace:cur,wrap,workspaces:Object.fromEntries([1,2,3,4,5].map(n=>[n,{active:ws[n].active,files:ws[n].docs.map(d=>({name:d.name,content:d.content,weight:d.w}))}]))}}
+
+/* ---- Surlignage en direct ---- */
+const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function hl(d){
+ const t=d.ta.value,n=t.length,B=new Uint8Array(n),I=new Uint8Array(n),H=new Uint8Array(n),C=new Uint8Array(n);
+ let o=0;
+ for(const ln of t.split('\n')){
+  const run=(re,fn)=>{let m;re.lastIndex=0;while((m=re.exec(ln)))fn(m,o+m.index,o+m.index+m[0].length)};
+  run(RB,(m,a,b)=>B.fill(1,a,b));run(RI,(m,a,b)=>I.fill(1,a,b));
+  if(RH.test(ln))H.fill(1,o,o+ln.length);
+  run(RC,(m,a,b)=>C.fill(+m[1],a,b));
+  o+=ln.length+1}
+ const h=d.hit,cls=k=>(C[k]?'c'+C[k]:H[k]?'h':I[k]?'i':B[k]?'b':'')+(h&&k>=h[0]&&k<h[1]?' hit':'');
+ const seg=(c,s)=>`<span class="${c}">${esc(s)}</span>`;
+ let out='',st=0,cc=n?cls(0):'';
+ for(let k=1;k<=n;k++){const c=k<n?cls(k):null;if(c!==cc){out+=seg(cc,t.slice(st,k));st=k;cc=c}}
+ d.bd.innerHTML=out+'\n';fit(d);d.bd.scrollTop=d.ta.scrollTop;d.bd.scrollLeft=d.ta.scrollLeft}
+function fit(d){if(!d.ta)return;
+ d.bd.style.paddingRight=6+d.ta.offsetWidth-d.ta.clientWidth+'px';
+ d.bd.style.paddingBottom=6+d.ta.offsetHeight-d.ta.clientHeight+'px'}
+
+/* ---- Colonnes ---- */
+function mkCol(d){
+ const c=el('section','col'),h=el('div','head'),n=el('span','name'),x=el('button','x'),e=el('div','editor'),bd=el('pre','bd'),ta=el('textarea');
+ x.textContent='✕';x.title='Fermer le document';x.onclick=()=>{go(d);closeDoc()};
+ n.textContent=d.label;n.ondblclick=()=>{go(d);rename()};
+ ta.value=d.content;ta.spellcheck=false;ta.setAttribute('autocapitalize','off');ta.setAttribute('autocorrect','off');ta.setAttribute('autocomplete','off');
+ h.append(n,x);e.append(bd,ta);c.append(h,e);Object.assign(d,{c,n,bd,ta});
+ ta.addEventListener('input',()=>{d.modified=true;d.hit=null;hl(d);refresh()});
+ ta.addEventListener('scroll',()=>{bd.scrollTop=ta.scrollTop;bd.scrollLeft=ta.scrollLeft});
+ ta.addEventListener('focusin',()=>go(d));
+ ta.addEventListener('keydown',ev=>{if(ev.key==='Tab'){ev.preventDefault();step(ev.shiftKey?-1:1)}});
+ c.onmousedown=ev=>{if(ev.target===c)ta.focus()};
+ new ResizeObserver(()=>fit(d)).observe(ta);
+ $('#cols').append(c);hl(d)}
+function layout(){
+ const D=docs(),n=D.length;let t;
+ if(n<2||idx==null)t=`repeat(${n},minmax(0,1fr))`;
+ else{const sc=D.map(d=>Math.max(1,Math.round(d.w*10))),S=sc.reduce((a,v,i)=>a+(i===idx?0:v),0);
+  t=D.map((d,i)=>`minmax(0,${i===idx?S:3*sc[i]}fr)`).join(' ')}
+ $('#cols').style.gridTemplateColumns=t}
+function go(d){
+ const D=docs();idx=D.indexOf(d);ws[cur].active=idx;
+ D.forEach(x=>x.c.classList.toggle('active',x===d));
+ $('#wr').value=d.w;$('#wv').textContent=d.w.toFixed(1);layout();refresh();fit(d)}
+function refresh(){
+ docs().forEach(d=>{if(d.n)d.n.textContent=d.label});
+ document.title='MD Editor — [WS '+cur+'] '+act().label}
+function step(k){const D=docs(),n=D.length;if(n<2)return;const d=D[(idx+k+n)%n];go(d);d.ta.focus();say((idx+1)+'/'+n)}
+function show(){
+ const w=ws[cur];
+ if(!w.docs.length){w.docs.push(new Doc('Sans titre 1',''));w.active=0}
+ $('#cols').classList.toggle('nowrap',!wrap);
+ w.docs.forEach(mkCol);
+ idx=Number.isInteger(w.active)&&w.active<w.docs.length?w.active:0;
+ const d=act();go(d);d.ta.focus()}
+function switchTo(n){
+ if(n===cur)return;
+ $('#find').hidden=true;sync();ws[cur].active=idx;
+ docs().forEach(d=>{d.c.remove();d.c=d.ta=d.bd=d.n=null});
+ cur=n;say('Workspace '+n);show()}
+function toggleWrap(){
+ wrap=!wrap;$('#cols').classList.toggle('nowrap',!wrap);docs().forEach(hl)}
+
+/* ---- Actions ---- */
+function newDoc(){
+ const D=docs();let k=1;while(D.some(d=>d.name==='Sans titre '+k))k++;
+ const d=new Doc('Sans titre '+k,'',true);D.push(d);dirty=true;mkCol(d);go(d);d.ta.focus()}
+function importDocs(){
+ const inp=el('input');inp.type='file';inp.multiple=true;inp.accept='.md,.markdown,.txt,text/*';
+ inp.onchange=async()=>{let last=null;
+  for(const f of inp.files){
+   try{const t=(await f.text()).replace(/^\uFEFF/,'').replace(/\r\n?/g,'\n');
+    last=new Doc(f.name.replace(/\.[^.]*$/,'')||'Sans titre',t,true);docs().push(last);dirty=true;mkCol(last)}
+   catch(e){await info('Import impossible : '+e.message)}}
+  if(last){go(last);last.ta.focus()}};
+ inp.click()}
+function exportDoc(){
+ const d=act(),a=el('a');
+ a.href=URL.createObjectURL(new Blob([d.ta.value],{type:'text/markdown;charset=utf-8'}));
+ a.download=(d.name.replace(/[\\\/:*?"<>|\x00-\x1f]/g,'_')||'document')+'.md';a.click();
+ setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+async function rename(){
+ const d=act(),v=await ask('Renommer le document',[{value:d.name}]);
+ if(!v||!v[0].trim())return;
+ d.name=v[0].trim();d.modified=true;dirty=true;refresh();d.ta.focus()}
+async function closeDoc(){
+ const D=docs(),d=act(),i=idx;
+ if(!await ask('Supprimer « '+d.name+' » du workspace '+cur+' ? Son contenu sera retiré des données à la prochaine sauvegarde.',[],'Oui','Non')){d.ta.focus();return}
+ d.c.remove();D.splice(i,1);dirty=true;
+ if(!D.length){const z=new Doc('Sans titre 1','');D.push(z);mkCol(z)}
+ const nb=D[Math.min(i,D.length-1)];go(nb);nb.ta.focus()}
+async function saveAll(){
+ if(locked)return info('Le chargement initial a échoué : la sauvegarde est désactivée pour ne pas écraser les données distantes. Rechargez la page.');
+ const st=build();
+ try{await sb('POST',JSON.stringify(st,null,2));
+  Object.values(ws).forEach(w=>w.docs.forEach(d=>d.modified=false));dirty=false;refresh();
+  say('Tout sauvegardé ('+Object.values(ws).reduce((a,w)=>a+w.docs.length,0)+' fichiers)')}
+ catch(e){await info('Sauvegarde impossible : '+e.message)}}
+const isDirty=()=>dirty||Object.values(ws).some(w=>w.docs.some(d=>d.modified));
+
+/* ---- Édition ---- */
+function ins(text,a,b){
+ const ta=act().ta;ta.focus();ta.setSelectionRange(a,b);
+ if(!document.execCommand('insertText',false,text)){ta.setRangeText(text,a,b,'end');ta.dispatchEvent(new Event('input'))}}
+function wrapSel(l,r){const ta=act().ta,a=ta.selectionStart,b=ta.selectionEnd;ins(l+ta.value.slice(a,b)+r,a,b)}
+function prefix(p){const ta=act().ta,s=ta.selectionStart,i=s?ta.value.lastIndexOf('\n',s-1)+1:0;ins(p,i,i)}
+function cmd(c){act().ta.focus();document.execCommand(c)}
+function paste(){navigator.clipboard.readText().then(t=>{const ta=act().ta;ins(t,ta.selectionStart,ta.selectionEnd)}).catch(()=>say('Collez avec '+MOD+'V'))}
+
+/* ---- Rechercher / Remplacer ---- */
+function openFind(){const f=$('#find');f.hidden=false;$('#fq').focus();$('#fq').select()}
+function next(){
+ const d=act(),q=$('#fq').value;if(!q)return;
+ const t=d.ta.value;let i=t.indexOf(q,d.hit?d.hit[1]:0);if(i<0)i=t.indexOf(q);
+ if(i<0){d.hit=null;hl(d);return say('« '+q+' » introuvable')}
+ d.hit=[i,i+q.length];hl(d);
+ const s=d.bd.querySelector('.hit');if(s){d.ta.scrollTop=Math.max(0,s.offsetTop-d.ta.clientHeight/3);d.bd.scrollTop=d.ta.scrollTop}}
+function replaceOne(){
+ const d=act(),q=$('#fq').value;
+ if(d.hit&&d.ta.value.slice(d.hit[0],d.hit[1])===q){ins($('#fr').value,d.hit[0],d.hit[1]);d.hit=null}
+ next();$('#fq').focus()}
+function replaceAll(){
+ const d=act(),q=$('#fq').value,t=d.ta.value;
+ if(!q||!t.includes(q))return say('« '+q+' » introuvable');
+ ins(t.split(q).join($('#fr').value),0,t.length);$('#fq').focus()}
+$('#fn').onclick=next;$('#fo').onclick=replaceOne;$('#fa').onclick=replaceAll;$('#fx').onclick=()=>$('#find').hidden=true;
+$('#fq').onkeydown=e=>{if(e.key==='Enter')next()};
+
+/* ---- Poids de la colonne ---- */
+function openWeight(){$('#wt').hidden=false}
+$('#wr').oninput=e=>{const d=act();d.w=clampW(e.target.value);$('#wv').textContent=d.w.toFixed(1);layout()};
+$('#wx').onclick=()=>$('#wt').hidden=true;
+
+/* ---- Menu ☰ ---- */
+const menu=()=>[
+ ['Fichier','',[['Nouveau','Alt+N',newDoc],['Importer…','Mod+O',importDocs],['Exporter…','',exportDoc],['Renommer…','F2',rename],['Fermer le document','Alt+W',closeDoc],'-',['Tout sauvegarder','Mod+S',saveAll]]],
+ ['Workspace','',[1,2,3,4,5].map(n=>[(n===cur?'● ':'○ ')+'Workspace '+n,'Mod+'+n,()=>switchTo(n)])],
+ ['Édition','',[['Annuler','Mod+Z',()=>cmd('undo')],['Rétablir','Mod+Y',()=>cmd('redo')],'-',['Couper','',()=>cmd('cut')],['Copier','',()=>cmd('copy')],['Coller','',paste],'-',['Rechercher / Remplacer…','Mod+F',openFind]]],
+ ['Format','',[['Gras','Mod+B',()=>wrapSel('**','**')],['Italique','Mod+I',()=>wrapSel('*','*')],
+  ['Couleur','',[1,2,3,4,5,6,7,8,9].map(n=>[n+'   '+n+'^texte^','',()=>wrapSel(n+'^','^')])],'-',
+  ['Titre 1','',()=>prefix('# ')],['Titre 2','',()=>prefix('## ')],['Puce','',()=>prefix('- ')]]],
+ ['Affichage','',[['Retour à la ligne'+(wrap?' ✓':''),'',toggleWrap],['Poids de la colonne…','',openWeight]]]];
+function render(items,box){items.forEach(it=>{
+ if(it==='-')return box.append(el('hr'));
+ const b=el('button');b.textContent=it[0];
+ if(Array.isArray(it[2])){const sub=el('div','sub');sub.hidden=true;render(it[2],sub);b.textContent=it[0]+' ▸';b.onclick=()=>sub.hidden=!sub.hidden;box.append(b,sub)}
+ else{if(it[1]){const k=el('small');k.textContent=it[1].replace('Mod+',MOD);b.append(k)}
+  b.onclick=()=>{$('#menu').hidden=true;it[2]()};box.append(b)}})}
+$('#burger').onclick=()=>{const m=$('#menu');if(m.hidden){m.innerHTML='';render(menu(),m);m.hidden=false}else m.hidden=true};
+$('#menu').onmousedown=e=>e.preventDefault();
+document.addEventListener('mousedown',e=>{if(!e.target.closest('#menu,#burger'))$('#menu').hidden=true});
+$('#prev').onclick=()=>step(-1);$('#next').onclick=()=>step(1);
+
+/* ---- Raccourcis (event.code : compatible AZERTY) ---- */
+addEventListener('keydown',e=>{
+ if($('#dlg').open)return;
+ const m=e.ctrlKey||e.metaKey,c=e.code,dg=/^Digit[1-5]$/.test(c);let f=null;
+ if(m&&!e.altKey){
+  if(c==='KeyS')f=saveAll;else if(c==='KeyO')f=importDocs;else if(c==='KeyF')f=openFind;
+  else if(c==='KeyB')f=()=>wrapSel('**','**');else if(c==='KeyI')f=()=>wrapSel('*','*');
+  else if(dg)f=()=>switchTo(+c[5])}
+ else if(e.altKey&&!m){
+  if(c==='KeyN')f=newDoc;else if(c==='KeyW')f=closeDoc;else if(e.shiftKey&&dg)f=()=>switchTo(+c[5])}
+ if(c==='F2')f=rename;
+ if(f){e.preventDefault();f()}},true);
+addEventListener('beforeunload',e=>{if(ws&&isDirty()){e.preventDefault();e.returnValue=''}});
+
+/* ---- Démarrage ---- */
+(async()=>{
+ let st;
+ try{
+  const txt=await sb('GET');
+  if(txt===null)st=parse({workspaces:{}});
+  else{let o;try{o=JSON.parse(txt)}catch(e){}
+   try{st=parse(o)}catch(e){
+    const ts=new Date().toISOString().replace(/\D/g,'').slice(0,14);
+    try{await sb('POST',txt,'donnees.corrupt-'+ts+'.json')}catch(_){}
+    await info('Les données sont illisibles. Une copie a été mise de côté sous donnees.corrupt-'+ts+'.json ; l\'éditeur démarre à vide.');
+    st=parse({workspaces:{}})}}}
+ catch(e){locked=true;await info('Chargement impossible : '+e.message+'. La sauvegarde est désactivée ; rechargez la page.');st=parse({workspaces:{}})}
+ ws=st.ws;cur=st.cur;wrap=st.wrap;show()})();
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>
